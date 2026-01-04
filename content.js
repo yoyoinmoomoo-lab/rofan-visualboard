@@ -1131,8 +1131,8 @@ function teardownRofanAutoUpdateObserver() {
   }
 }
 
-// rofan.ai 자동 업데이트 Observer 설정 (초기화 완료 후에만 활성화)
-async function setupRofanAutoUpdateObserver() {
+// rofan.ai 자동 업데이트 Observer 설정 (게이트 제거: storage 초기화 실패해도 observer는 무조건 붙임)
+function setupRofanAutoUpdateObserver() {
   // 이미 설정돼 있으면 다시 만들지 않음
   if (autoUpdateObserver) return;
 
@@ -1142,101 +1142,51 @@ async function setupRofanAutoUpdateObserver() {
     return;
   }
 
-  return new Promise((resolve) => {
-    // ✅ Extension context 체크
-    if (!isExtensionContextAlive()) {
-      console.log('[Vivid Chat][content] Cannot setup observer: context invalidated');
-      resolve(false);
-      return;
-    }
-    
+  // ✅ Extension context 체크
+  if (!isExtensionContextAlive()) {
+    console.log('[Vivid Chat][content] Cannot setup observer: context invalidated');
+    return;
+  }
+
+  // ✅ 게이트 제거: storage 체크 없이 chatRoot만 찾으면 바로 observer 붙이기
+  // (중복/빈 응답 방지는 handleAutoUpdateTurn()에서 처리)
+  const chatRoot = 
+    document.querySelector('div.lg\\:pr-5.overflow-y-auto') ||
+    document.querySelector('main') ||
+    document.body;
+
+  if (!chatRoot) {
+    console.warn('[Vivid Chat][content] chat root not found for auto update (tried: div.lg\\:pr-5, main, body)');
+    return;
+  }
+
+  let timer = null;
+  autoUpdateObserver = new MutationObserver(() => {
     try {
-      chrome.storage.local.get(
-        [`chat_logs_initialized::${chatId}`, `first_message::${chatId}`],
-        (result) => {
-          try {
-            // ✅ Extension context 체크 (콜백 내부)
-            if (!isExtensionContextAlive()) {
-              console.log('[Vivid Chat][content] Observer setup aborted: context invalidated in callback');
-              resolve(false);
-              return;
-            }
-            
-            if (chrome.runtime.lastError) {
-              const errorMsg = chrome.runtime.lastError.message || String(chrome.runtime.lastError);
-              if (isContextInvalidatedError({ message: errorMsg })) {
-                stopAutoUpdateObserver("storage_callback_context_invalidated");
-                resolve(false);
-                return;
-              }
-              console.warn('[Vivid Chat][content] Failed to check init state:', chrome.runtime.lastError);
-              resolve(false);
-              return;
-            }
-
-            const isInitialized = result[`chat_logs_initialized::${chatId}`] === true;
-            const hasFirstMessage = !!(result[`first_message::${chatId}`] && String(result[`first_message::${chatId}`]).trim());
-
-            // ✅ 둘 중 하나라도 있으면 Observer 가동
-            if (!isInitialized && !hasFirstMessage) {
-              console.log('[Vivid Chat][content] Observer setup deferred: waiting for init/first_message');
-              resolve(false);
-              return;
-            }
-
-            const chatRoot = document.querySelector('div.lg\\:pr-5.overflow-y-auto');
-            if (!chatRoot) {
-              console.warn('[Vivid Chat][content] chat root not found for auto update');
-              resolve(false);
-              return;
-            }
-
-            let timer = null;
-            autoUpdateObserver = new MutationObserver(() => {
-              try {
-                // ✅ Extension context 체크: invalidated면 즉시 disconnect
-                if (!isExtensionContextAlive()) {
-                  stopAutoUpdateObserver("observer_callback_context_invalidated");
-                  return;
-                }
-                
-                if (timer) clearTimeout(timer);
-                timer = setTimeout(handleAutoUpdateTurn, 500);
-              } catch (e) {
-                const m = String(e?.message || e);
-                if (isContextInvalidatedError(e) || m.includes("Extension context invalidated")) {
-                  stopAutoUpdateObserver("observer_callback_invalidated");
-                } else {
-                  console.warn("[Vivid Chat][content] MutationObserver callback error:", e);
-                }
-              }
-            });
-
-            autoUpdateObserver.observe(chatRoot, { childList: true, subtree: true });
-
-            console.log('[Vivid Chat][content] Auto-update observer attached', {
-              chatId,
-              isInitialized,
-              hasFirstMessage,
-            });
-            resolve(true);
-          } catch (callbackErr) {
-            const m = String(callbackErr?.message || callbackErr);
-            if (isContextInvalidatedError(callbackErr) || m.includes("Extension context invalidated")) {
-              stopAutoUpdateObserver("storage_callback_exception_invalidated");
-            }
-            resolve(false);
-          }
-        }
-      );
+      // ✅ Extension context 체크: invalidated면 즉시 disconnect
+      if (!isExtensionContextAlive()) {
+        stopAutoUpdateObserver("observer_callback_context_invalidated");
+        return;
+      }
+      
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(handleAutoUpdateTurn, 500);
     } catch (e) {
       const m = String(e?.message || e);
       if (isContextInvalidatedError(e) || m.includes("Extension context invalidated")) {
-        stopAutoUpdateObserver("storage_call_exception_invalidated");
+        stopAutoUpdateObserver("observer_callback_invalidated");
+      } else {
+        console.warn("[Vivid Chat][content] MutationObserver callback error:", e);
       }
-      console.warn('[Vivid Chat][content] Failed to setup observer:', e);
-      resolve(false);
     }
+  });
+
+  autoUpdateObserver.observe(chatRoot, { childList: true, subtree: true });
+
+  console.log('[Vivid Chat][content] Auto-update observer attached (no init gate)', {
+    chatId,
+    chatRootSelector: chatRoot === document.querySelector('div.lg\\:pr-5.overflow-y-auto') ? 'div.lg:pr-5' : 
+                     (chatRoot === document.querySelector('main') ? 'main' : 'body'),
   });
 }
 
@@ -1429,7 +1379,7 @@ function checkLocationAndSetupObserver() {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', async () => {
         // 초기화 완료 후 Observer 설정
-        await setupRofanAutoUpdateObserver();
+        setupRofanAutoUpdateObserver();
         // DOM 로드 후에도 한 번 더 시도 (타이밍 이슈 대비)
         hydrateInitialChatLogsFromNextData();
         tryParseNextDataAndStore();
